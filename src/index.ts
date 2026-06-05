@@ -1,8 +1,12 @@
 import parseRange from "range-parser";
 
 export interface Env {
-  R2_BUCKET: R2Bucket;
+  // R2 bucket bindings are accessed dynamically via env[bindingName].
+  // Binding names follow the convention: <PREFIX>_BUCKET (e.g. BLOG_BUCKET, MOMENT_BUCKET).
+  // The URL path prefix is uppercased to form the binding name: /blog/... -> BLOG_BUCKET
+  [key: string]: unknown;
   ALLOWED_ORIGINS?: string;
+  ALLOWED_REFERERS?: string;
   CACHE_CONTROL?: string;
   PATH_PREFIX?: string;
   INDEX_FILE?: string;
@@ -39,10 +43,73 @@ function getRangeHeader(range: ParsedRange, fileSize: number): string {
   }/${fileSize}`;
 }
 
+/**
+ * Hotlink protection: check if the request's Referer is allowed.
+ * - If ALLOWED_REFERERS is empty or unset, all requests are allowed.
+ * - Requests with no Referer (direct access, bookmarks, curl) are always allowed.
+ * - Supports exact domain match and wildcard subdomain (*.example.com).
+ */
+function isRefererAllowed(
+  referer: string | null,
+  allowedReferers: string | undefined
+): boolean {
+  // No config = disabled, allow all
+  if (!allowedReferers || allowedReferers === "") return true;
+  // No Referer header = direct access, always allow
+  if (!referer) return true;
+
+  let refererHost: string;
+  try {
+    refererHost = new URL(referer).hostname;
+  } catch {
+    return false;
+  }
+
+  const patterns = allowedReferers.split(",").map((s) => s.trim());
+  for (const pattern of patterns) {
+    if (pattern.startsWith("*.")) {
+      const domain = pattern.slice(2);
+      if (refererHost === domain || refererHost.endsWith("." + domain)) {
+        return true;
+      }
+    } else {
+      if (refererHost === pattern) return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Dynamically route to the correct R2 bucket based on the first path segment.
+ * The binding name is derived by convention: /<prefix>/... -> <PREFIX>_BUCKET
+ * e.g. /blog/hello.md  -> env.BLOG_BUCKET with key "hello.md"
+ *      /moment/pic.jpg -> env.MOMENT_BUCKET with key "pic.jpg"
+ *
+ * This means you only need to add a new [[r2_buckets]] in wrangler.toml
+ * with binding = "<PREFIX>_BUCKET" and it will be automatically routed.
+ */
+function getBucket(
+  path: string,
+  env: Env
+): { bucket: R2Bucket; key: string } | null {
+  const segments = path.split("/").filter(Boolean);
+  if (segments.length === 0) return null;
+
+  const prefix = segments[0];
+  const bindingName = `${prefix.toUpperCase()}_BUCKET`;
+  const bucket = env[bindingName];
+
+  if (!bucket) return null;
+
+  return { bucket: bucket as R2Bucket, key: segments.slice(1).join("/") };
+}
+
 // some ideas for this were taken from / inspired by
 // https://github.com/cloudflare/workerd/blob/main/samples/static-files-from-disk/static.js
 async function makeListingResponse(
   path: string,
+  bucket: R2Bucket,
   env: Env,
   request: Request
 ): Promise<Response | null> {
@@ -51,7 +118,7 @@ async function makeListingResponse(
     path += "/";
   }
   let cursor = new URL(request.url).searchParams.get("cursor") || undefined;
-  let listing = await env.R2_BUCKET.list({
+  let listing = await bucket.list({
     prefix: path,
     delimiter: "/",
     cursor,
@@ -204,6 +271,14 @@ export default {
       });
     }
 
+    // Hotlink protection
+    const referer = request.headers.get("referer");
+    if (
+      !isRefererAllowed(referer, env.ALLOWED_REFERERS as string | undefined)
+    ) {
+      return new Response("Forbidden", { status: 403 });
+    }
+
     let triedIndex = false;
 
     let response: Response | undefined;
@@ -222,17 +297,34 @@ export default {
         console.warn("Cache MISS for", request.url);
       }
       const url = new URL(request.url);
-      let path = (env.PATH_PREFIX || "") + decodeURIComponent(url.pathname);
+      let fullPath = (env.PATH_PREFIX || "") + decodeURIComponent(url.pathname);
+
+      // Route to the correct bucket based on the first path segment
+      if (fullPath.startsWith("/")) fullPath = fullPath.substring(1);
+      const routed = getBucket(fullPath, env);
+      if (routed === null) {
+        return new Response("Not Found: unknown bucket prefix", {
+          status: 404,
+        });
+      }
+
+      const bucket = routed.bucket;
+      let path = routed.key;
 
       // directory logic
-      if (path.endsWith("/")) {
+      if (path === "" || path.endsWith("/")) {
         // if theres an index file, try that. 404 logic down below has dir fallback.
         if (env.INDEX_FILE && env.INDEX_FILE !== "") {
           path += env.INDEX_FILE;
           triedIndex = true;
         } else if (env.DIRECTORY_LISTING) {
           // return the dir listing
-          let listResponse = await makeListingResponse(path, env, request);
+          let listResponse = await makeListingResponse(
+            path,
+            bucket,
+            env,
+            request
+          );
 
           if (listResponse !== null) {
             if (listResponse.headers.get("cache-control") !== "no-store") {
@@ -243,17 +335,13 @@ export default {
         }
       }
 
-      if (path !== "/" && path.startsWith("/")) {
-        path = path.substring(1);
-      }
-
       let file: R2Object | R2ObjectBody | null | undefined;
 
       // Range handling
       if (request.method === "GET") {
         const rangeHeader = request.headers.get("range");
         if (rangeHeader) {
-          file = await retryAsync(env, () => env.R2_BUCKET.head(path));
+          file = await retryAsync(env, () => bucket.head(path));
           if (file === null)
             return new Response("File Not Found", { status: 404 });
           const parsedRanges = parseRange(file.size, rangeHeader);
@@ -306,7 +394,7 @@ export default {
 
       if (ifMatch || ifUnmodifiedSince) {
         file = await retryAsync(env, () =>
-          env.R2_BUCKET.get(path, {
+          bucket.get(path, {
             onlyIf: {
               etagMatches: ifMatch,
               uploadedBefore: ifUnmodifiedSince
@@ -326,14 +414,14 @@ export default {
         // if-none-match overrides if-modified-since completely
         if (ifNoneMatch) {
           file = await retryAsync(env, () =>
-            env.R2_BUCKET.get(path, {
+            bucket.get(path, {
               onlyIf: { etagDoesNotMatch: ifNoneMatch },
               range,
             })
           );
         } else if (ifModifiedSince) {
           file = await retryAsync(env, () =>
-            env.R2_BUCKET.get(path, {
+            bucket.get(path, {
               onlyIf: { uploadedAfter: new Date(ifModifiedSince) },
               range,
             })
@@ -346,10 +434,10 @@ export default {
 
       file =
         request.method === "HEAD"
-          ? await retryAsync(env, () => env.R2_BUCKET.head(path))
+          ? await retryAsync(env, () => bucket.head(path))
           : file && hasBody(file)
-          ? file
-          : await retryAsync(env, () => env.R2_BUCKET.get(path, { range }));
+            ? file
+            : await retryAsync(env, () => bucket.get(path, { range }));
 
       let notFound: boolean = false;
 
@@ -361,7 +449,12 @@ export default {
 
         if (env.DIRECTORY_LISTING && (path.endsWith("/") || path === "")) {
           // return the dir listing
-          let listResponse = await makeListingResponse(path, env, request);
+          let listResponse = await makeListingResponse(
+            path,
+            bucket,
+            env,
+            request
+          );
 
           if (listResponse !== null) {
             if (listResponse.headers.get("cache-control") !== "no-store") {
@@ -376,8 +469,8 @@ export default {
           path = env.NOTFOUND_FILE;
           file =
             request.method === "HEAD"
-              ? await retryAsync(env, () => env.R2_BUCKET.head(path))
-              : await retryAsync(env, () => env.R2_BUCKET.get(path));
+              ? await retryAsync(env, () => bucket.head(path))
+              : await retryAsync(env, () => bucket.get(path));
         }
 
         // if it's still null, either 404 is disabled or that file wasn't found either
