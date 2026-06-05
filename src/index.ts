@@ -285,8 +285,15 @@ export default {
 
     const isCachingEnabled = env.CACHE_CONTROL !== "no-store";
     const cache = caches.default;
+
+    // Build a cache key that ignores query parameters,
+    // so ?v=1&t=2 etc. always hits the same cache entry.
+    const cacheUrl = new URL(request.url);
+    cacheUrl.search = "";
+    const cacheKey = new Request(cacheUrl.toString(), request);
+
     if (isCachingEnabled) {
-      response = await cache.match(request);
+      response = await cache.match(cacheKey);
     }
 
     // Since we produce this result from the request, we don't need to strictly use an R2Range
@@ -328,7 +335,7 @@ export default {
 
           if (listResponse !== null) {
             if (listResponse.headers.get("cache-control") !== "no-store") {
-              ctx.waitUntil(cache.put(request, listResponse.clone()));
+              ctx.waitUntil(cache.put(cacheKey, listResponse.clone()));
             }
             return listResponse;
           }
@@ -458,7 +465,7 @@ export default {
 
           if (listResponse !== null) {
             if (listResponse.headers.get("cache-control") !== "no-store") {
-              ctx.waitUntil(cache.put(request, listResponse.clone()));
+              ctx.waitUntil(cache.put(cacheKey, listResponse.clone()));
             }
             return listResponse;
           }
@@ -517,7 +524,7 @@ export default {
       });
 
       if (request.method === "GET" && !range && isCachingEnabled && !notFound)
-        ctx.waitUntil(cache.put(request, response.clone()));
+        ctx.waitUntil(cache.put(cacheKey, response.clone()));
     } else {
       if (env.LOGGING) {
         console.warn("Cache HIT for", request.url);
