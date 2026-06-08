@@ -340,7 +340,10 @@ export default {
     // Since we produce this result from the request, we don't need to strictly use an R2Range
     let range: ParsedRange | undefined;
 
-    if (!response || !(response.ok || response.status == 304)) {
+    if (
+      !response ||
+      !(response.ok || response.status == 304 || response.status == 404)
+    ) {
       if (env.LOGGING) {
         console.warn("Cache MISS for", request.url);
       }
