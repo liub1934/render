@@ -58,6 +58,16 @@ LOGGING = true
 # Set the number of retries allowed for each R2 operation (-1 for unlimited).
 R2_RETRIES = 3
 
+# Cache duration (in seconds) for 404 responses to prevent R2 request spam.
+# Set to 0 to disable 404 caching.
+NOT_FOUND_CACHE = 86400
+
+# Path validation rules per bucket (convention: <PREFIX>_BUCKET_PATH_RULE).
+# If set, only paths matching the regex are forwarded to R2. Non-matching paths get 404 immediately.
+# Leave empty "" or omit to disable validation for that bucket.
+BLOG_BUCKET_PATH_RULE = "^(19|20)\\d{2}/(0[1-9]|1[0-2])/(0[1-9]|[12]\\d|3[01])/[a-f0-9]+\\.(png|jpg|jpeg|webp|gif)$"
+MOMENT_BUCKET_PATH_RULE = "^images/[a-f0-9]+_[0-9]{10}_[a-f0-9]+\\.(png|jpg|jpeg|webp|gif)$"
+
 [observability]
 enabled = true
 

@@ -8,6 +8,7 @@ export interface Env {
   ALLOWED_ORIGINS?: string;
   ALLOWED_REFERERS?: string;
   CACHE_CONTROL?: string;
+  NOT_FOUND_CACHE?: number;
   PATH_PREFIX?: string;
   INDEX_FILE?: string;
   NOTFOUND_FILE?: string;
@@ -78,6 +79,25 @@ function isRefererAllowed(
   }
 
   return false;
+}
+
+/**
+ * Validate the path against bucket-specific regex rules.
+ * Looks for env.<PREFIX>_BUCKET_PATH_RULE (e.g. BLOG_BUCKET_PATH_RULE).
+ * If the rule exists, the key must match it. Otherwise all paths are allowed.
+ */
+function isPathValid(prefix: string, key: string, env: Env): boolean {
+  const ruleName = `${prefix.toUpperCase()}_BUCKET_PATH_RULE`;
+  const pattern = env[ruleName] as string | undefined;
+  if (!pattern || pattern === "") return true;
+
+  try {
+    const regex = new RegExp(pattern);
+    return regex.test(key);
+  } catch {
+    // Invalid regex, fail open
+    return true;
+  }
 }
 
 /**
@@ -229,6 +249,27 @@ ${htmlList.join("\n")}
   });
 }
 
+/**
+ * Create a cached 404 response. Caches for NOT_FOUND_CACHE seconds (default 86400 = 1 day).
+ */
+function makeNotFoundResponse(
+  env: Env,
+  cache: Cache,
+  cacheKey: Request,
+  isCachingEnabled: boolean,
+  ctx: ExecutionContext
+): Response {
+  const ttl = (env.NOT_FOUND_CACHE as number) || 86400;
+  const response = new Response("File Not Found", {
+    status: 404,
+    headers: { "cache-control": `public,max-age=${ttl}` },
+  });
+  if (isCachingEnabled) {
+    ctx.waitUntil(cache.put(cacheKey, response.clone()));
+  }
+  return response;
+}
+
 async function retryAsync<T>(env: Env, fn: () => Promise<T>): Promise<T> {
   const maxAttempts = env.R2_RETRIES || 0;
   let attempts = 0;
@@ -318,6 +359,22 @@ export default {
       const bucket = routed.bucket;
       let path = routed.key;
 
+      // Path validation: reject obviously invalid paths before hitting R2
+      const bucketPrefix = fullPath.split("/").filter(Boolean)[0];
+      if (
+        path !== "" &&
+        !path.endsWith("/") &&
+        !isPathValid(bucketPrefix, path, env)
+      ) {
+        return makeNotFoundResponse(
+          env,
+          cache,
+          cacheKey,
+          isCachingEnabled,
+          ctx
+        );
+      }
+
       // directory logic
       if (path === "" || path.endsWith("/")) {
         // if theres an index file, try that. 404 logic down below has dir fallback.
@@ -349,8 +406,15 @@ export default {
         const rangeHeader = request.headers.get("range");
         if (rangeHeader) {
           file = await retryAsync(env, () => bucket.head(path));
-          if (file === null)
-            return new Response("File Not Found", { status: 404 });
+          if (file === null) {
+            return makeNotFoundResponse(
+              env,
+              cache,
+              cacheKey,
+              isCachingEnabled,
+              ctx
+            );
+          }
           const parsedRanges = parseRange(file.size, rangeHeader);
           // R2 only supports 1 range at the moment, reject if there is more than one
           if (
@@ -483,7 +547,13 @@ export default {
         // if it's still null, either 404 is disabled or that file wasn't found either
         // this isn't an else because then there would have to be two of them
         if (file == null) {
-          return new Response("File Not Found", { status: 404 });
+          return makeNotFoundResponse(
+            env,
+            cache,
+            cacheKey,
+            isCachingEnabled,
+            ctx
+          );
         }
       }
 
