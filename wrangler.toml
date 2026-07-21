@@ -67,7 +67,7 @@ NOT_FOUND_CACHE = 86400
 # Leave empty "" or omit to disable validation for that bucket.
 BLOG_BUCKET_PATH_RULE = "^(19|20)\\d{2}/(0[1-9]|1[0-2])/(0[1-9]|[12]\\d|3[01])/[a-f0-9]+\\.(png|jpg|jpeg|webp|gif)$"
 MOMENT_BUCKET_PATH_RULE = "^images/[a-f0-9]+_[0-9]{10}_[a-f0-9]+\\.(png|jpg|jpeg|webp|gif)$"
-MEIZITU_BUCKET_PATH_RULE = "^[A-Za-z0-9]{16}\\.(png|jpg|jpeg|webp|gif|mp4|webm|mov|m4v|avi|mkv)$"
+MEIZITU_BUCKET_PATH_RULE = "^[A-Za-z0-9]{16}(-thumb)?\\.(png|jpg|jpeg|webp|gif|mp4|webm|mov|m4v|avi|mkv)$"
 
 [observability]
 enabled = true
