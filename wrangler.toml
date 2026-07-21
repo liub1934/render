@@ -15,7 +15,7 @@ ALLOWED_ORIGINS = "*"
 # Requests with no Referer header (direct access, bookmarks) are always allowed.
 # Set to "" to disable hotlink protection (allow all).
 # Example: "test.com,*.test.com,another.com"
-ALLOWED_REFERERS = "*.liubing.me,www.npmjs.com"
+ALLOWED_REFERERS = "*.liubing.me,www.npmjs.com,*.meizitu.vip"
 
 # The `cache-control` header: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cache-Control.
 # Optional, the `cache-control` header is omitted if unset, which would NOT disable caching: https://developers.cloudflare.com/workers/runtime-apis/cache/#headers
